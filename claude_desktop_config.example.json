@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "api-tester": {
+      "command": "node",
+      "args": ["C:/ruta/completa/a/tu/proyecto/api-tester-mcp/index.js"],
+      "env": {}
+    }
+  }
+}
