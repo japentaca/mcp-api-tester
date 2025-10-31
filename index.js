@@ -3,6 +3,9 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import axios from 'axios';
+import { z } from 'zod';
+import fs from 'fs';
+import path from 'path';
 
 // Create an MCP server for API testing
 const server = new Server({
@@ -19,6 +22,72 @@ const apiClient = axios.create({
   timeout: 30000, // 30 second timeout
   maxRedirects: 5,
 });
+
+// Validation schemas using Zod
+const urlSchema = z.string().url("Invalid URL format");
+const headersSchema = z.record(z.string()).optional().default({});
+const paramsSchema = z.record(z.string()).optional().default({});
+const httpMethodSchema = z.enum(["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"]);
+
+const apiGetSchema = z.object({
+  url: urlSchema,
+  headers: headersSchema,
+  params: paramsSchema
+});
+
+const apiPostSchema = z.object({
+  url: urlSchema,
+  data: z.any().optional(),
+  headers: headersSchema,
+  params: paramsSchema
+});
+
+const apiPutSchema = z.object({
+  url: urlSchema,
+  data: z.any().optional(),
+  headers: headersSchema,
+  params: paramsSchema
+});
+
+const apiDeleteSchema = z.object({
+  url: urlSchema,
+  headers: headersSchema,
+  params: paramsSchema
+});
+
+const apiRequestSchema = z.object({
+  method: httpMethodSchema,
+  url: urlSchema,
+  data: z.any().optional(),
+  headers: headersSchema,
+  params: paramsSchema
+});
+
+// Helper function to validate arguments safely
+function validateArgs(schema, args, toolName) {
+  try {
+    // Verificar que schema existe y tiene el método parse
+    if (!schema || typeof schema.parse !== 'function') {
+      throw new Error(`Invalid schema provided for ${toolName}`);
+    }
+
+    // Si args es undefined o null, usar un objeto vacío
+    const argsToValidate = args || {};
+
+    // Verificar que args es un objeto
+    if (typeof argsToValidate !== 'object' || Array.isArray(argsToValidate)) {
+      throw new Error(`Invalid arguments: expected object, got ${typeof argsToValidate}`);
+    }
+
+    return schema.parse(argsToValidate);
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      const errorMessages = error.errors.map(err => `${err.path.join('.')}: ${err.message}`).join(', ');
+      throw new Error(`Validation failed for ${toolName}: ${errorMessages}`);
+    }
+    throw error;
+  }
+}
 
 // Helper function to format successful API responses
 function formatApiResponse(response, method, url, requestData = null) {
@@ -62,6 +131,58 @@ function formatErrorResponse(error, method, url, requestData = null) {
   }
 
   return result;
+}
+
+// Función genérica para manejar errores con logging
+function handleErrorWithLogging(error, method, url, requestData = null, additionalContext = {}) {
+  const timestamp = new Date().toISOString();
+  const errorResponse = formatErrorResponse(error, method, url, requestData);
+
+  // Crear objeto completo de log con toda la información
+  const logEntry = {
+    timestamp,
+    method,
+    url,
+    requestData,
+    error: {
+      message: error.message,
+      code: error.code || 'UNKNOWN_ERROR',
+      stack: error.stack
+    },
+    response: error.response ? {
+      status: error.response.status,
+      statusText: error.response.statusText,
+      headers: error.response.headers,
+      data: error.response.data
+    } : null,
+    additionalContext,
+    errorResponse
+  };
+
+  // Escribir al archivo de log
+  try {
+    const logDir = path.join(process.cwd(), 'logs');
+    if (!fs.existsSync(logDir)) {
+      fs.mkdirSync(logDir, { recursive: true });
+    }
+
+    const logFile = path.join(logDir, 'api-tester-errors.log');
+    const logLine = JSON.stringify(logEntry, null, 2) + '\n' + '='.repeat(80) + '\n';
+
+    fs.appendFileSync(logFile, logLine);
+  } catch (logError) {
+    // Si falla el logging, al menos registrarlo en consola
+    console.error('Error escribiendo al log:', logError.message);
+    console.error('Error original:', error.message);
+  }
+
+  // Retornar la respuesta formateada para el cliente MCP
+  return {
+    content: [{
+      type: "text",
+      text: JSON.stringify(errorResponse, null, 2)
+    }]
+  };
 }
 
 // Register tools handler
@@ -213,7 +334,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   try {
     switch (name) {
       case "api_get": {
-        const { url, headers = {}, params = {} } = args;
+        // Validate arguments
+        const validatedArgs = validateArgs(apiGetSchema, args, 'api_get');
+        const { url, headers, params } = validatedArgs;
 
         // Add timing metadata
         const startTime = Date.now();
@@ -234,17 +357,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             }]
           };
         } catch (error) {
-          return {
-            content: [{
-              type: "text",
-              text: JSON.stringify(formatErrorResponse(error, 'GET', url), null, 2)
-            }]
-          };
+          return handleErrorWithLogging(error, 'GET', url, null, { toolName: 'api_get' });
         }
       }
 
       case "api_post": {
-        const { url, data, headers = {}, params = {} } = args;
+        // Validate arguments
+        const validatedArgs = validateArgs(apiPostSchema, args, 'api_post');
+        const { url, data, headers, params } = validatedArgs;
 
         const startTime = Date.now();
         const config = {
@@ -264,17 +384,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             }]
           };
         } catch (error) {
-          return {
-            content: [{
-              type: "text",
-              text: JSON.stringify(formatErrorResponse(error, 'POST', url, data), null, 2)
-            }]
-          };
+          return handleErrorWithLogging(error, 'POST', url, data, { toolName: 'api_post' });
         }
       }
 
       case "api_put": {
-        const { url, data, headers = {}, params = {} } = args;
+        // Validate arguments
+        const validatedArgs = validateArgs(apiPutSchema, args, 'api_put');
+        const { url, data, headers, params } = validatedArgs;
 
         const startTime = Date.now();
         const config = {
@@ -294,17 +411,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             }]
           };
         } catch (error) {
-          return {
-            content: [{
-              type: "text",
-              text: JSON.stringify(formatErrorResponse(error, 'PUT', url, data), null, 2)
-            }]
-          };
+          return handleErrorWithLogging(error, 'PUT', url, data, { toolName: 'api_put' });
         }
       }
 
       case "api_delete": {
-        const { url, headers = {}, params = {} } = args;
+        // Validate arguments
+        const validatedArgs = validateArgs(apiDeleteSchema, args, 'api_delete');
+        const { url, headers, params } = validatedArgs;
 
         const startTime = Date.now();
         const config = {
@@ -324,17 +438,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             }]
           };
         } catch (error) {
-          return {
-            content: [{
-              type: "text",
-              text: JSON.stringify(formatErrorResponse(error, 'DELETE', url), null, 2)
-            }]
-          };
+          return handleErrorWithLogging(error, 'DELETE', url, null, { toolName: 'api_delete' });
         }
       }
 
       case "api_request": {
-        const { method, url, data, headers = {}, params = {} } = args;
+        // Validate arguments
+        const validatedArgs = validateArgs(apiRequestSchema, args, 'api_request');
+        const { method, url, data, headers, params } = validatedArgs;
 
         const startTime = Date.now();
         const config = {
@@ -360,12 +471,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             }]
           };
         } catch (error) {
-          return {
-            content: [{
-              type: "text",
-              text: JSON.stringify(formatErrorResponse(error, method.toUpperCase(), url, data), null, 2)
-            }]
-          };
+          return handleErrorWithLogging(error, method.toUpperCase(), url, data, { toolName: 'api_request' });
         }
       }
 
@@ -373,6 +479,34 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         throw new Error(`Unknown tool: ${name}`);
     }
   } catch (error) {
+    // Log del error general del handler
+    const timestamp = new Date().toISOString();
+    const logEntry = {
+      timestamp,
+      type: 'handler_error',
+      tool: name,
+      error: {
+        message: error.message,
+        stack: error.stack
+      },
+      request: request
+    };
+
+    try {
+      const logDir = path.join(process.cwd(), 'logs');
+      if (!fs.existsSync(logDir)) {
+        fs.mkdirSync(logDir, { recursive: true });
+      }
+
+      const logFile = path.join(logDir, 'api-tester-errors.log');
+      const logLine = JSON.stringify(logEntry, null, 2) + '\n' + '='.repeat(80) + '\n';
+
+      fs.appendFileSync(logFile, logLine);
+    } catch (logError) {
+      console.error('Error escribiendo al log:', logError.message);
+      console.error('Error original:', error.message);
+    }
+
     return {
       content: [{
         type: "text",
@@ -402,5 +536,31 @@ process.on('SIGINT', () => {
 
 main().catch((error) => {
   console.error("Failed to start server:", error);
+
+  // Log del error de inicialización del servidor
+  const timestamp = new Date().toISOString();
+  const logEntry = {
+    timestamp,
+    type: 'server_startup_error',
+    error: {
+      message: error.message,
+      stack: error.stack
+    }
+  };
+
+  try {
+    const logDir = path.join(process.cwd(), 'logs');
+    if (!fs.existsSync(logDir)) {
+      fs.mkdirSync(logDir, { recursive: true });
+    }
+
+    const logFile = path.join(logDir, 'api-tester-errors.log');
+    const logLine = JSON.stringify(logEntry, null, 2) + '\n' + '='.repeat(80) + '\n';
+
+    fs.appendFileSync(logFile, logLine);
+  } catch (logError) {
+    console.error('Error escribiendo al log:', logError.message);
+  }
+
   process.exit(1);
 });
