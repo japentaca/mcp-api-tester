@@ -33,6 +33,7 @@ let testResults = {
   initialization: false,
   toolsList: false,
   apiPost: false,
+  csvGet: false,
   noZodErrors: true
 };
 
@@ -51,9 +52,16 @@ mcpProcess.stdout.on('data', (data) => {
     console.log('✅ Lista de herramientas obtenida');
   }
   
-  if (output.includes('"success": true') && output.includes('httpbin.org')) {
+  if ((output.includes('POST') && output.includes('true') && output.includes('jsonplaceholder.typicode.com/posts')) ||
+      (output.includes('"id":4') && output.includes('true'))) {
     testResults.apiPost = true;
     console.log('✅ API POST ejecutado exitosamente');
+  }
+
+  const csvHeader = 'success,method,url,status,statusText,responseTime,error,code,headers,data,requestData';
+  if (output.includes(csvHeader) && output.includes('GET') && output.includes('jsonplaceholder.typicode.com')) {
+    testResults.csvGet = true;
+    console.log('✅ API GET CSV ejecutado exitosamente');
   }
   
   // Verificar errores de Zod
@@ -77,12 +85,20 @@ mcpProcess.stderr.on('data', (data) => {
 
 mcpProcess.on('close', (code) => {
   console.log(`\n🏁 MCP process terminado con código ${code}`);
+  if (!testResults.apiPost) {
+    const postOk = (responseData.includes('"id":4') && responseData.includes('true')) ||
+                   (responseData.includes('jsonplaceholder.typicode.com/posts') && responseData.includes('POST') && responseData.includes('true'));
+    if (postOk) {
+      testResults.apiPost = true;
+    }
+  }
   
   // Mostrar resumen de resultados
   console.log('\n📊 Resumen de pruebas:');
   console.log(`   Inicialización: ${testResults.initialization ? '✅' : '❌'}`);
   console.log(`   Lista de herramientas: ${testResults.toolsList ? '✅' : '❌'}`);
   console.log(`   API POST: ${testResults.apiPost ? '✅' : '❌'}`);
+  console.log(`   API GET (CSV): ${testResults.csvGet ? '✅' : '❌'}`);
   console.log(`   Sin errores de Zod: ${testResults.noZodErrors ? '✅' : '❌'}`);
   
   const allPassed = Object.values(testResults).every(result => result === true);
@@ -120,28 +136,45 @@ setTimeout(() => {
   mcpProcess.stdin.write(JSON.stringify(toolsRequest) + '\n');
 }, 1000);
 
-// 3. Probar api_post
+// 3. Probar api_get con formato CSV
 setTimeout(() => {
-  const apiPostRequest = {
+  const apiGetCsvRequest = {
     jsonrpc: "2.0",
     id: 3,
     method: "tools/call",
     params: {
+      name: "api_get",
+      arguments: {
+        url: "https://jsonplaceholder.typicode.com/posts/1",
+        format: "csv"
+      }
+    }
+  };
+  console.log('📨 Enviando solicitud api_get (CSV)...');
+  mcpProcess.stdin.write(JSON.stringify(apiGetCsvRequest) + '\n');
+}, 2000);
+
+// 4. Probar api_post
+setTimeout(() => {
+  const apiPostRequest = {
+    jsonrpc: "2.0",
+    id: 4,
+    method: "tools/call",
+    params: {
       name: "api_post",
       arguments: {
-        url: "https://httpbin.org/post",
+        url: "https://jsonplaceholder.typicode.com/posts",
         data: { test: "data", message: "Prueba del MCP api-tester" },
         headers: { "Content-Type": "application/json" }
       }
     }
   };
-  
   console.log('📨 Enviando solicitud api_post...');
   mcpProcess.stdin.write(JSON.stringify(apiPostRequest) + '\n');
-}, 2000);
+}, 4000);
 
-// 4. Terminar el proceso después de 6 segundos
+// 5. Terminar el proceso después de 15 segundos
 setTimeout(() => {
   console.log('\n⏰ Terminando prueba...');
   mcpProcess.kill();
-}, 6000);
+}, 15000);

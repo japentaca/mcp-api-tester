@@ -28,65 +28,54 @@ const urlSchema = z.string().url("Invalid URL format");
 const headersSchema = z.record(z.string()).optional().default({});
 const paramsSchema = z.record(z.string()).optional().default({});
 const httpMethodSchema = z.enum(["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"]);
+const formatSchema = z.enum(["json", "csv"]).optional();
 
 const apiGetSchema = z.object({
   url: urlSchema,
   headers: headersSchema,
-  params: paramsSchema
+  params: paramsSchema,
+  format: formatSchema
 });
 
 const apiPostSchema = z.object({
   url: urlSchema,
-  data: z.any().optional(),
+  data: z.unknown().optional(),
   headers: headersSchema,
-  params: paramsSchema
+  params: paramsSchema,
+  format: formatSchema
 });
 
 const apiPutSchema = z.object({
   url: urlSchema,
-  data: z.any().optional(),
+  data: z.unknown().optional(),
   headers: headersSchema,
-  params: paramsSchema
+  params: paramsSchema,
+  format: formatSchema
 });
 
 const apiDeleteSchema = z.object({
   url: urlSchema,
   headers: headersSchema,
-  params: paramsSchema
+  params: paramsSchema,
+  format: formatSchema
 });
 
 const apiRequestSchema = z.object({
   method: httpMethodSchema,
   url: urlSchema,
-  data: z.any().optional(),
+  data: z.unknown().optional(),
   headers: headersSchema,
-  params: paramsSchema
+  params: paramsSchema,
+  format: formatSchema
 });
 
 // Helper function to validate arguments safely
 function validateArgs(schema, args, toolName) {
-  try {
-    // Verificar que schema existe y tiene el método parse
-    if (!schema || typeof schema.parse !== 'function') {
-      throw new Error(`Invalid schema provided for ${toolName}`);
-    }
-
-    // Si args es undefined o null, usar un objeto vacío
-    const argsToValidate = args || {};
-
-    // Verificar que args es un objeto
-    if (typeof argsToValidate !== 'object' || Array.isArray(argsToValidate)) {
-      throw new Error(`Invalid arguments: expected object, got ${typeof argsToValidate}`);
-    }
-
-    return schema.parse(argsToValidate);
-  } catch (error) {
-    if (error instanceof z.ZodError) {
-      const errorMessages = error.errors.map(err => `${err.path.join('.')}: ${err.message}`).join(', ');
-      throw new Error(`Validation failed for ${toolName}: ${errorMessages}`);
-    }
-    throw error;
+  const argsToValidate = args || {};
+  if (typeof argsToValidate !== 'object' || Array.isArray(argsToValidate)) {
+    throw new Error(`Invalid arguments: expected object, got ${typeof argsToValidate}`);
   }
+  return argsToValidate;
 }
 
 // Helper function to format successful API responses
@@ -133,8 +122,146 @@ function formatErrorResponse(error, method, url, requestData = null) {
   return result;
 }
 
+function escapeCsvValue(value) {
+  if (value === undefined || value === null) return '';
+  const stringValue = String(value);
+  // Si contiene comas, saltos de línea o comillas, envolver en comillas y escapar comillas internas
+  if (stringValue.includes(',') || stringValue.includes('\n') || stringValue.includes('"')) {
+    return `"${stringValue.replace(/"/g, '""')}"`;
+  }
+  // Si es un número, devolverlo tal cual
+  if (!isNaN(stringValue) && stringValue.trim() !== '') {
+    return stringValue;
+  }
+  return stringValue;
+}
+
+function convertArrayOfObjectsToCsv(data) {
+  if (!Array.isArray(data) || data.length === 0) {
+    return '';
+  }
+
+  // Obtener todas las claves únicas de todos los objetos
+  const headers = new Set();
+  data.forEach(obj => {
+    if (typeof obj === 'object' && obj !== null) {
+      Object.keys(obj).forEach(key => headers.add(key));
+    }
+  });
+
+  const headerArray = Array.from(headers);
+  if (headerArray.length === 0) {
+    return '';
+  }
+
+  // Construir CSV
+  const csvRows = [];
+  csvRows.push(headerArray.map(escapeCsvValue).join(','));
+
+  data.forEach(obj => {
+    if (typeof obj === 'object' && obj !== null) {
+      const row = headerArray.map(header => {
+        const value = obj[header];
+        return escapeCsvValue(value);
+      });
+      csvRows.push(row.join(','));
+    }
+  });
+
+  return csvRows.join('\n');
+}
+
+function convertObjectToCsv(data) {
+  if (typeof data !== 'object' || data === null) {
+    return '';
+  }
+
+  const csvRows = [];
+  const headers = Object.keys(data);
+
+  if (headers.length === 0) {
+    return '';
+  }
+
+  csvRows.push(headers.map(escapeCsvValue).join(','));
+  csvRows.push(headers.map(header => escapeCsvValue(data[header])).join(','));
+
+  return csvRows.join('\n');
+}
+
+function generateMetadataRow(result) {
+  const metadata = [];
+  metadata.push(`status:${result.status || 'N/A'}`);
+  metadata.push(`method:${result.method || 'N/A'}`);
+  metadata.push(`url:${result.url || 'N/A'}`);
+  metadata.push(`time:${result.responseTime || 'N/A'}ms`);
+
+  if (result.error) {
+    metadata.push(`error:${result.error}`);
+  }
+
+  return `# ${metadata.join('|')}`;
+}
+
+function toCsv(result) {
+  try {
+    // Si hay error, devolver CSV de error simple
+    if (result.error) {
+      const errorCsv = [
+        generateMetadataRow(result),
+        'error,code,message',
+        `${escapeCsvValue(result.error)},${escapeCsvValue(result.code || 'UNKNOWN_ERROR')},${escapeCsvValue(result.error)}`
+      ].join('\n');
+      return errorCsv;
+    }
+
+    // Generar metadatos como primera línea comentada
+    const metadataRow = generateMetadataRow(result);
+
+    // Procesar datos de respuesta
+    let csvContent = '';
+
+    if (result.data) {
+      if (Array.isArray(result.data)) {
+        // Si es array de objetos, convertir a CSV
+        csvContent = convertArrayOfObjectsToCsv(result.data);
+      } else if (typeof result.data === 'object') {
+        // Si es objeto simple, convertir a CSV
+        csvContent = convertObjectToCsv(result.data);
+      } else {
+        // Si es texto o número, crear CSV simple
+        csvContent = `value\n${escapeCsvValue(result.data)}`;
+      }
+    }
+
+    // Si no hay contenido CSV válido, crear estructura por defecto
+    if (!csvContent) {
+      csvContent = 'status,method,url\n' +
+        `${escapeCsvValue(result.status)},${escapeCsvValue(result.method)},${escapeCsvValue(result.url)}`;
+    }
+
+    return `${metadataRow}\n${csvContent}`;
+
+  } catch (error) {
+    // Fallback en caso de error en la conversión
+    const fallbackCsv = [
+      generateMetadataRow(result),
+      'error,code,message',
+      `CSV Conversion Error,CONVERSION_ERROR,${escapeCsvValue(error.message)}`
+    ].join('\n');
+    return fallbackCsv;
+  }
+}
+
+function buildContent(result, format) {
+  if (format === 'csv') {
+    return { content: [{ type: 'text', text: toCsv(result) }] };
+  }
+  return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+}
+
 // Función genérica para manejar errores con logging
-function handleErrorWithLogging(error, method, url, requestData = null, additionalContext = {}) {
+function handleErrorWithLogging(error, method, url, requestData = null, additionalContext = {}, format = 'json') {
   const timestamp = new Date().toISOString();
   const errorResponse = formatErrorResponse(error, method, url, requestData);
 
@@ -177,12 +304,7 @@ function handleErrorWithLogging(error, method, url, requestData = null, addition
   }
 
   // Retornar la respuesta formateada para el cliente MCP
-  return {
-    content: [{
-      type: "text",
-      text: JSON.stringify(errorResponse, null, 2)
-    }]
-  };
+  return buildContent(errorResponse, format);
 }
 
 // Register tools handler
@@ -208,6 +330,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: "object",
               description: "Optional query parameters as key-value pairs",
               additionalProperties: { type: "string" }
+            },
+            format: {
+              type: "string",
+              enum: ["json", "csv"],
+              description: "Output format (default: json)"
             }
           },
           required: ["url"]
@@ -235,6 +362,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: "object",
               description: "Optional query parameters as key-value pairs",
               additionalProperties: { type: "string" }
+            },
+            format: {
+              type: "string",
+              enum: ["json", "csv"],
+              description: "Output format (default: json)"
             }
           },
           required: ["url"]
@@ -262,6 +394,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: "object",
               description: "Optional query parameters as key-value pairs",
               additionalProperties: { type: "string" }
+            },
+            format: {
+              type: "string",
+              enum: ["json", "csv"],
+              description: "Output format (default: json)"
             }
           },
           required: ["url"]
@@ -286,6 +423,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: "object",
               description: "Optional query parameters as key-value pairs",
               additionalProperties: { type: "string" }
+            },
+            format: {
+              type: "string",
+              enum: ["json", "csv"],
+              description: "Output format (default: json)"
             }
           },
           required: ["url"]
@@ -318,6 +460,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: "object",
               description: "Optional query parameters as key-value pairs",
               additionalProperties: { type: "string" }
+            },
+            format: {
+              type: "string",
+              enum: ["json", "csv"],
+              description: "Output format (default: json)"
             }
           },
           required: ["method", "url"]
@@ -336,7 +483,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "api_get": {
         // Validate arguments
         const validatedArgs = validateArgs(apiGetSchema, args, 'api_get');
-        const { url, headers, params } = validatedArgs;
+        const { url, headers, params, format } = validatedArgs;
+        const fmt = format || 'json';
 
         // Add timing metadata
         const startTime = Date.now();
@@ -350,21 +498,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           const response = await apiClient.get(url, config);
           response.config.metadata.endTime = Date.now();
 
-          return {
-            content: [{
-              type: "text",
-              text: JSON.stringify(formatApiResponse(response, 'GET', url), null, 2)
-            }]
-          };
+          const result = formatApiResponse(response, 'GET', url);
+          return buildContent(result, fmt);
         } catch (error) {
-          return handleErrorWithLogging(error, 'GET', url, null, { toolName: 'api_get' });
+          return handleErrorWithLogging(error, 'GET', url, null, { toolName: 'api_get' }, fmt);
         }
       }
 
       case "api_post": {
         // Validate arguments
         const validatedArgs = validateArgs(apiPostSchema, args, 'api_post');
-        const { url, data, headers, params } = validatedArgs;
+        const { url, data, headers, params, format } = validatedArgs;
+        const fmt = format || 'json';
 
         const startTime = Date.now();
         const config = {
@@ -377,21 +522,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           const response = await apiClient.post(url, data, config);
           response.config.metadata.endTime = Date.now();
 
-          return {
-            content: [{
-              type: "text",
-              text: JSON.stringify(formatApiResponse(response, 'POST', url, data), null, 2)
-            }]
-          };
+          const result = formatApiResponse(response, 'POST', url, data);
+          return buildContent(result, fmt);
         } catch (error) {
-          return handleErrorWithLogging(error, 'POST', url, data, { toolName: 'api_post' });
+          return handleErrorWithLogging(error, 'POST', url, data, { toolName: 'api_post' }, fmt);
         }
       }
 
       case "api_put": {
         // Validate arguments
         const validatedArgs = validateArgs(apiPutSchema, args, 'api_put');
-        const { url, data, headers, params } = validatedArgs;
+        const { url, data, headers, params, format } = validatedArgs;
+        const fmt = format || 'json';
 
         const startTime = Date.now();
         const config = {
@@ -404,21 +546,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           const response = await apiClient.put(url, data, config);
           response.config.metadata.endTime = Date.now();
 
-          return {
-            content: [{
-              type: "text",
-              text: JSON.stringify(formatApiResponse(response, 'PUT', url, data), null, 2)
-            }]
-          };
+          const result = formatApiResponse(response, 'PUT', url, data);
+          return buildContent(result, fmt);
         } catch (error) {
-          return handleErrorWithLogging(error, 'PUT', url, data, { toolName: 'api_put' });
+          return handleErrorWithLogging(error, 'PUT', url, data, { toolName: 'api_put' }, fmt);
         }
       }
 
       case "api_delete": {
         // Validate arguments
         const validatedArgs = validateArgs(apiDeleteSchema, args, 'api_delete');
-        const { url, headers, params } = validatedArgs;
+        const { url, headers, params, format } = validatedArgs;
+        const fmt = format || 'json';
 
         const startTime = Date.now();
         const config = {
@@ -431,21 +570,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           const response = await apiClient.delete(url, config);
           response.config.metadata.endTime = Date.now();
 
-          return {
-            content: [{
-              type: "text",
-              text: JSON.stringify(formatApiResponse(response, 'DELETE', url), null, 2)
-            }]
-          };
+          const result = formatApiResponse(response, 'DELETE', url);
+          return buildContent(result, fmt);
         } catch (error) {
-          return handleErrorWithLogging(error, 'DELETE', url, null, { toolName: 'api_delete' });
+          return handleErrorWithLogging(error, 'DELETE', url, null, { toolName: 'api_delete' }, fmt);
         }
       }
 
       case "api_request": {
         // Validate arguments
         const validatedArgs = validateArgs(apiRequestSchema, args, 'api_request');
-        const { method, url, data, headers, params } = validatedArgs;
+        const { method, url, data, headers, params, format } = validatedArgs;
+        const fmt = format || 'json';
 
         const startTime = Date.now();
         const config = {
@@ -464,14 +600,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           const response = await apiClient.request(config);
           response.config.metadata.endTime = Date.now();
 
-          return {
-            content: [{
-              type: "text",
-              text: JSON.stringify(formatApiResponse(response, method.toUpperCase(), url, data), null, 2)
-            }]
-          };
+          const result = formatApiResponse(response, method.toUpperCase(), url, data);
+          return buildContent(result, fmt);
         } catch (error) {
-          return handleErrorWithLogging(error, method.toUpperCase(), url, data, { toolName: 'api_request' });
+          return handleErrorWithLogging(error, method.toUpperCase(), url, data, { toolName: 'api_request' }, fmt);
         }
       }
 

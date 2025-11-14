@@ -1,6 +1,6 @@
 {
   "name": "api-tester-mcp",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Un servidor MCP (Model Context Protocol) para realizar pruebas de APIs de forma sencilla y eficiente con soporte para todos los métodos HTTP",
   "main": "index.js",
   "type": "module",
